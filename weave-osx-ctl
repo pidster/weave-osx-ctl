@@ -58,6 +58,7 @@ do_setup() {
 
 do_status() {
   __configure
+
   if [ $WEAVE_OSX_VERBOSE -eq 1 ]; then
     netstat -rnf inet
     echo ""
@@ -104,6 +105,7 @@ do_reset() {
 
 do_usage() {
   __usage_no_exit
+
   exit 1
 }
 
@@ -111,9 +113,16 @@ do_usage() {
 # internal functions
 
 __configure() {
+  # is Weave Net installed?
   if [ ! `command -v weave` ]; then
-    echo "Weave script is not found!"
-    exit 0
+    __need_weave_script
+    exit 1
+  fi
+
+  # is Weave Net running?
+  local weave_launched=$( __weave_not_running )
+  if [ $weave_launched -eq 1 ]; then
+    __start_weave_or_exit
   fi
 
   DOCKER_HOSTNAME="${DOCKER_HOSTNAME:-docker.local}"
@@ -122,11 +131,12 @@ __configure() {
 
   WEAVE_DNS=$(weave report -f "{{ .DNS.Address }}")
   WEAVE_DNS_IP=${WEAVE_DNS%:53}
-  WEAVE_DNS_DOMAIN=$(weave report -f "{{.DNS.Domain}}" | sed "s/^\(.*\)\.$/\1/")
+  WEAVE_DNS_DOMAIN=$(weave report -f "{{ .DNS.Domain }}" | sed "s/^\(.*\)\.$/\1/")
   WEAVE_IPAM_SUBNET=$(weave report -f "{{ .IPAM.DefaultSubnet }}")
 
   if [ $WEAVE_OSX_VERBOSE -eq 1 ]; then
     echo "~~~~~~~~~~~~~~~~~~~~~~~~~~ DEBUG enabled! ~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    echo " Input timeout:${WEAVE_OSX_TIMEOUT}s"
     echo " Weave DNS IP: ${WEAVE_DNS_IP}"
     echo " Weave domain: ${WEAVE_DNS_DOMAIN}"
     echo " Weave subnet: ${WEAVE_IPAM_SUBNET}"
@@ -141,7 +151,7 @@ __configure() {
 __read_input_or_exit() {
   
   if [ $WEAVE_OSX_ACCEPT -eq 1 ]; then
-    return 0
+    return 1
   fi
 
   local word=$1
@@ -165,6 +175,64 @@ __convert_binary() {
   else
     echo false
   fi
+}
+
+__need_weave_script() {
+  cat >&2 <<EOF
+The Weave script is required, and not found in your path.
+You can install it using the following commands:
+
+  sudo curl -L git.io/weave -o /usr/local/bin/weave
+  sudo chmod a+x /usr/local/bin/weave"
+
+EOF
+}
+
+__weave_not_running() {
+  RUNNING_CONTAINERS=`docker ps --format="{{.Names}}"`
+  local running_router=0
+  local running_plugin=0
+  local running_proxy=0
+
+  for container in $RUNNING_CONTAINERS
+  do
+    case "$container" in
+      weave)
+        running_router=1
+        ;;
+      weaveplugin)
+        running_plugin=1
+        ;;
+      weaveproxy)
+        running_proxy=1
+        ;;
+    esac
+  done
+
+  local score=$(( running_router + running_plugin + running_proxy ))
+
+  if [ $score -eq 3 ]; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+__start_weave_or_exit() {
+  read -n 1 -p "Weave Net must be running, start it now? [y/n] " -t ${WEAVE_OSX_TIMEOUT}
+
+  if [ "" == "${REPLY}" ]; then
+    echo ""
+    echo "Timed out after ${WEAVE_OSX_TIMEOUT} seconds', Weave NOT launched"
+    exit 1
+  elif [ "y" != "${REPLY}" ]; then
+    echo ""
+    echo "Reply was '${REPLY}', Weave NOT launched!"
+    exit 1
+  fi
+
+  echo "Launching Weave..."
+  RES=`weave launch`
 }
 
 __usage_no_exit() {
