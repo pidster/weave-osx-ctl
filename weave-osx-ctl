@@ -1,0 +1,215 @@
+#!/bin/bash +x
+
+set -e
+
+WEAVE_OSX_TIMEOUT="${WEAVE_OSX_TIMEOUT:=60}"
+WEAVE_OSX_SCRIPT=`basename "$0"`
+WEAVE_OSX_ACCEPT=0
+WEAVE_OSX_DEBUG=0
+WEAVE_OSX_VERBOSE=0
+
+#####################################################################
+# defines functions
+
+do_setup() {
+  __configure
+
+  INSTALL_SUBNET_ROUTE="sudo route add -net ${WEAVE_IPAM_SUBNET} ${DOCKER_HOSTNAME}"
+  INSTALL_DNSSRV_ROUTE="sudo route add -host ${WEAVE_DNS_IP} ${DOCKER_HOSTNAME}"
+  INSTALL_DNS_HOSTFLTR="sudo ifconfig ${BRIDGE_INTERFACE} -hostfilter ${MEMBER_INTERFACE}"
+  INSTALL_DNS_RESOLVER="sudo mkdir -p /etc/resolver && sudo sh -c 'echo \"nameserver ${WEAVE_DNS_IP}\" >/etc/resolver/${WEAVE_DNS_DOMAIN}'"
+
+  echo "The following commands will be executed:"
+  echo " ${INSTALL_DNS_HOSTFLTR}"
+  echo " ${INSTALL_DNSSRV_ROUTE}"
+  echo " ${INSTALL_DNS_RESOLVER}"
+  echo " ${INSTALL_SUBNET_ROUTE}"
+  echo " weave expose"
+  echo ""
+
+  __read_input_or_exit "installed"
+
+  echo ""
+  echo "Please enter your password to enable 'sudo'..."
+  sudo echo "Password accepted!" && \
+       weave expose >/dev/null 2>&1 && \
+       eval "${INSTALL_DNS_HOSTFLTR}" && \
+       eval "${INSTALL_DNSSRV_ROUTE}" && \
+       eval "${INSTALL_DNS_RESOLVER}" && \
+       eval "${INSTALL_SUBNET_ROUTE}" 
+
+}
+
+do_status() {
+  __configure
+  if [ $WEAVE_OSX_VERBOSE -eq 1 ]; then
+    netstat -rnf inet
+    echo ""
+  fi
+
+  echo "Network route status:"
+
+  WEAVE_DNS_TEST=`netstat -rnf inet | grep ${WEAVE_DNS_IP} | wc -l | awk '{ print $1 }'`
+  WEAVE_SUBNET_TEST=`netstat -rnf inet | grep ${WEAVE_IPAM_SUBNET/.0.0/} | wc -l  | awk '{ print $1 }'`
+
+  echo " Weave DNS '${WEAVE_DNS_IP}' route installed: $(__convert_binary $WEAVE_DNS_TEST)"
+  if [ $WEAVE_DNS_TEST -eq 1 ]; then
+    WEAVE_DNS_ROUTABLE=`ping -q -o -t 2 -c 1 ${WEAVE_DNS_IP} >/dev/null 2>&1 && echo 1`
+    echo " Weave DNS '${WEAVE_DNS_IP}' answered a ping: $(__convert_binary $WEAVE_DNS_ROUTABLE)"
+  fi
+  echo " Sub-net '${WEAVE_IPAM_SUBNET}' route installed: $(__convert_binary $WEAVE_SUBNET_TEST)"
+}
+
+do_reset() {
+  __configure
+
+  echo "De-configuring local DNS mapping..."
+
+  DELETE_SUBNET_ROUTE="sudo route delete -net ${WEAVE_IPAM_SUBNET} ${DOCKER_HOSTNAME}"
+  DELETE_DNSSRV_ROUTE="sudo route delete -host ${WEAVE_DNS_IP} ${DOCKER_HOSTNAME}"
+  DELETE_DNS_RESOLVER="sudo rm /etc/resolver/${WEAVE_DNS_DOMAIN}"
+
+  echo "The following commands will be executed:"
+  echo " ${DELETE_SUBNET_ROUTE}"
+  echo " ${DELETE_DNS_RESOLVER}"
+  echo " ${DELETE_DNSSRV_ROUTE}"
+  echo ""
+
+  __read_input_or_exit "deleted"
+
+  echo ""
+  echo "Please enter your password to enable 'sudo'..."
+  sudo echo "Password accepted!" && \
+       eval "${DELETE_SUBNET_ROUTE}" && \
+       eval "${DELETE_DNS_RESOLVER}" && \
+       eval "${DELETE_DNSSRV_ROUTE}" && \
+       weave hide >/dev/null 2>&1
+}
+
+do_usage() {
+  __usage_no_exit
+  exit 1
+}
+
+#####################################################################
+# internal functions
+
+__configure() {
+  if [ ! `command -v weave` ]; then
+    echo "Weave script is not found!"
+    exit 0
+  fi
+
+  DOCKER_HOSTNAME="${DOCKER_HOSTNAME:-docker.local}"
+  BRIDGE_INTERFACE="${BRIDGE_INTERFACE:-bridge100}"
+  MEMBER_INTERFACE="$(ifconfig ${BRIDGE_INTERFACE} | grep 'member' | cut -d: -f2 | awk '{print $1}')"
+
+  WEAVE_DNS=$(weave report -f "{{ .DNS.Address }}")
+  WEAVE_DNS_IP=${WEAVE_DNS%:53}
+  WEAVE_DNS_DOMAIN=$(weave report -f "{{.DNS.Domain}}" | sed "s/^\(.*\)\.$/\1/")
+  WEAVE_IPAM_SUBNET=$(weave report -f "{{ .IPAM.DefaultSubnet }}")
+
+  if [ $WEAVE_OSX_VERBOSE -eq 1 ]; then
+    echo "~~~~~~~~~~~~~~~~~~~~~~~~~~ DEBUG enabled! ~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    echo " Weave DNS IP: ${WEAVE_DNS_IP}"
+    echo " Weave domain: ${WEAVE_DNS_DOMAIN}"
+    echo " Weave subnet: ${WEAVE_IPAM_SUBNET}"
+    echo " Docker Host : ${DOCKER_HOSTNAME} "
+    echo " Bridge iface: ${BRIDGE_INTERFACE}"
+    echo " Member iface: ${MEMBER_INTERFACE}"
+    echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    echo ""
+  fi
+}
+
+__read_input_or_exit() {
+  
+  if [ $WEAVE_OSX_ACCEPT -eq 1 ]; then
+    return 0
+  fi
+
+  local word=$1
+
+  # get input, waiting for the timeout period and accepting only 1 character
+  read -n 1 -p "Do you wish to proceed? [y/n] " -t ${WEAVE_OSX_TIMEOUT}
+  echo ""
+
+  if [ "" == "${REPLY}" ]; then
+    echo "Timed out after ${WEAVE_OSX_TIMEOUT} seconds', routes NOT $word!"
+    exit 1
+  elif [ "y" != "${REPLY}" ]; then
+    echo "Reply was '${REPLY}', routes NOT $word!"
+    exit 1
+  fi
+}
+
+__convert_binary() {
+  if [ $1 -eq 1 ]; then
+    echo true
+  else
+    echo false
+  fi
+}
+
+__usage_no_exit() {
+  cat >&2 <<EOF
+Usage:
+    ${WEAVE_OSX_SCRIPT} [ setup | reset | status | --help ]
+
+Options:
+    --accept     Avoid interactive prompts - assumes a 'yes' answer to each question
+    --debug      Sets the -x bit in bash to print output as the script executes
+    --verbose    Prints more information as the script executes
+
+Summary:
+    Configures routes to IP addresses of containers created using 
+    Docker for Mac (based on xhyve).
+
+    The script times out after ${WEAVE_OSX_TIMEOUT} seconds if no input is received.
+
+EOF
+}
+
+#####################################################################
+# executes inline
+
+[ $# -gt 0 ] || do_usage
+
+ARGS_NO_SWITCHES=()
+count=0
+
+# Collect and filter switches
+for argument in "$@"
+do
+  case "${argument}" in
+    --accept)
+      WEAVE_OSX_ACCEPT=1
+      ;;
+    --debug)
+      set -x
+      ;;
+    --verbose)
+      WEAVE_OSX_VERBOSE=1
+      ;;
+    *)
+      ARGS_NO_SWITCHES[$count]="${argument}"
+      ((count++))
+      ;;
+  esac
+done
+
+# process remaining arguments
+case "${ARGS_NO_SWITCHES[0]}" in
+  setup)
+      do_setup
+      ;;
+  reset)
+      do_reset
+      ;;
+  status)
+      do_status
+      ;;
+  *)
+      do_usage
+      ;;
+esac
